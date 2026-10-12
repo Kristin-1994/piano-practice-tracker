@@ -309,15 +309,18 @@
         <section class="sync-panel">
             <strong>☁️ 多设备同步</strong>
             <p>首次使用需填写 Supabase 项目地址和 anon key；手机、电脑使用同一个邮箱账号登录即可共享记录。</p>
-            <div class="sync-row">
+            <div class="sync-row" id="syncConfigRow">
                 <input id="supabaseUrl" type="text" placeholder="Supabase 项目 URL">
                 <input id="supabaseKey" type="text" placeholder="Supabase anon / publishable key">
             </div>
-            <div class="sync-row" style="margin-top:8px">
+            <div class="sync-row" id="syncAuthRow" style="margin-top:8px">
                 <input id="syncEmail" type="text" placeholder="同步邮箱">
                 <input id="syncPassword" type="password" placeholder="密码（至少 6 位）">
                 <button class="btn-sync" onclick="signIn()">登录 / 注册</button>
                 <button onclick="signOut()">退出</button>
+            </div>
+            <div class="sync-row" id="syncLogoutRow" style="margin-top:8px;display:none">
+                <button onclick="signOut()">切换账号 / 退出</button>
             </div>
             <div id="syncStatus" class="sync-status">当前为本机保存模式</div>
         </section>
@@ -389,6 +392,7 @@
             setTodayDate();
             document.getElementById('supabaseUrl').value = localStorage.getItem('supabaseUrl') || '';
             document.getElementById('supabaseKey').value = localStorage.getItem('supabaseKey') || '';
+            document.getElementById('syncEmail').value = localStorage.getItem('syncEmail') || '';
             loadRecords();
             updateStats();
             await loadSupabaseLibrary();
@@ -410,7 +414,17 @@
             if (!url || !key || !window.supabase) return;
             supabaseClient = window.supabase.createClient(url, key);
             const { data: { session } } = await supabaseClient.auth.getSession();
-            if (session) { await syncRecords(); setSyncStatus('已连接云端 · ' + session.user.email); }
+            if (session) {
+                document.getElementById('syncEmail').value = session.user.email || '';
+                setSyncStatus('已自动连接云端 · ' + session.user.email);
+                renderSyncState(true);
+                await syncRecords();
+            }
+        }
+        function renderSyncState(connected) {
+            document.getElementById('syncConfigRow').style.display = connected ? 'none' : 'flex';
+            document.getElementById('syncAuthRow').style.display = connected ? 'none' : 'flex';
+            document.getElementById('syncLogoutRow').style.display = connected ? 'flex' : 'none';
         }
         async function signIn() {
             const url = document.getElementById('supabaseUrl').value.trim();
@@ -420,6 +434,7 @@
             if (!url || !key || !email || password.length < 6) return alert('请填写项目 URL、anon key、邮箱和至少 6 位密码');
             if (!window.supabase) return alert('同步组件尚未加载，请刷新页面后重试');
             localStorage.setItem('supabaseUrl', url); localStorage.setItem('supabaseKey', key);
+            localStorage.setItem('syncEmail', email);
             supabaseClient = window.supabase.createClient(url, key);
             setSyncStatus('正在连接云端…');
             let result = await supabaseClient.auth.signInWithPassword({ email, password });
@@ -430,10 +445,11 @@
             if (!result.data.session) { setSyncStatus('请先到邮箱确认注册，再返回登录'); return; }
             await syncRecords();
             setSyncStatus('已连接云端 · ' + email);
+            renderSyncState(true);
         }
         async function signOut() {
             if (supabaseClient) await supabaseClient.auth.signOut();
-            supabaseClient = null; setSyncStatus('已退出云端，本机记录保留');
+            supabaseClient = null; renderSyncState(false); setSyncStatus('已退出云端，本机记录保留');
         }
         async function syncRecords() {
             if (!supabaseClient || syncBusy) return;

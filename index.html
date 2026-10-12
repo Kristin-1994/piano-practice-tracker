@@ -184,6 +184,13 @@
             margin-top: 40px;
         }
 
+        .sync-panel { background: #f5f6ff; border-radius: 12px; padding: 16px; margin: -20px 0 28px; }
+        .sync-panel p { color: #666; font-size: 13px; line-height: 1.5; margin: 8px 0; }
+        .sync-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .sync-row input { flex: 1; min-width: 130px; }
+        .sync-status { font-size: 13px; color: #667eea; margin-top: 8px; }
+        .btn-sync { background: #667eea; color: white; }
+
         .records-title {
             font-size: 18px;
             font-weight: bold;
@@ -299,6 +306,22 @@
             <div class="subtitle">坚持每一次练习，成就更好的自己</div>
         </div>
 
+        <section class="sync-panel">
+            <strong>☁️ 多设备同步</strong>
+            <p>首次使用需填写 Supabase 项目地址和 anon key；手机、电脑使用同一个邮箱账号登录即可共享记录。</p>
+            <div class="sync-row">
+                <input id="supabaseUrl" type="text" placeholder="Supabase 项目 URL">
+                <input id="supabaseKey" type="text" placeholder="Supabase anon / publishable key">
+            </div>
+            <div class="sync-row" style="margin-top:8px">
+                <input id="syncEmail" type="text" placeholder="同步邮箱">
+                <input id="syncPassword" type="password" placeholder="密码（至少 6 位）">
+                <button class="btn-sync" onclick="signIn()">登录 / 注册</button>
+                <button onclick="signOut()">退出</button>
+            </div>
+            <div id="syncStatus" class="sync-status">当前为本机保存模式</div>
+        </section>
+
         <div class="stats-container">
             <div class="stat-card consecutive-days">
                 <div class="stat-label">连续打卡天数</div>
@@ -360,12 +383,83 @@
     </div>
 
     <script>
-        // 初始化
-        document.addEventListener('DOMContentLoaded', function() {
+        let supabaseClient = null;
+        let syncBusy = false;
+        document.addEventListener('DOMContentLoaded', async function() {
             setTodayDate();
+            document.getElementById('supabaseUrl').value = localStorage.getItem('supabaseUrl') || '';
+            document.getElementById('supabaseKey').value = localStorage.getItem('supabaseKey') || '';
             loadRecords();
             updateStats();
+            await loadSupabaseLibrary();
         });
+
+        function setSyncStatus(message) { document.getElementById('syncStatus').textContent = message; }
+        function loadSupabaseLibrary() {
+            return new Promise((resolve) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+                script.onload = async () => { await connectSavedAccount(); resolve(); };
+                script.onerror = () => { setSyncStatus('同步组件加载失败，请检查网络；本机记录仍可使用'); resolve(); };
+                document.head.appendChild(script);
+            });
+        }
+        async function connectSavedAccount() {
+            const url = localStorage.getItem('supabaseUrl');
+            const key = localStorage.getItem('supabaseKey');
+            if (!url || !key || !window.supabase) return;
+            supabaseClient = window.supabase.createClient(url, key);
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (session) { await syncRecords(); setSyncStatus('已连接云端 · ' + session.user.email); }
+        }
+        async function signIn() {
+            const url = document.getElementById('supabaseUrl').value.trim();
+            const key = document.getElementById('supabaseKey').value.trim();
+            const email = document.getElementById('syncEmail').value.trim();
+            const password = document.getElementById('syncPassword').value;
+            if (!url || !key || !email || password.length < 6) return alert('请填写项目 URL、anon key、邮箱和至少 6 位密码');
+            if (!window.supabase) return alert('同步组件尚未加载，请刷新页面后重试');
+            localStorage.setItem('supabaseUrl', url); localStorage.setItem('supabaseKey', key);
+            supabaseClient = window.supabase.createClient(url, key);
+            setSyncStatus('正在连接云端…');
+            let result = await supabaseClient.auth.signInWithPassword({ email, password });
+            if (result.error && /invalid login credentials/i.test(result.error.message)) {
+                result = await supabaseClient.auth.signUp({ email, password });
+            }
+            if (result.error) { setSyncStatus('连接失败：' + result.error.message); return; }
+            if (!result.data.session) { setSyncStatus('请先到邮箱确认注册，再返回登录'); return; }
+            await syncRecords();
+            setSyncStatus('已连接云端 · ' + email);
+        }
+        async function signOut() {
+            if (supabaseClient) await supabaseClient.auth.signOut();
+            supabaseClient = null; setSyncStatus('已退出云端，本机记录保留');
+        }
+        async function syncRecords() {
+            if (!supabaseClient || syncBusy) return;
+            syncBusy = true;
+            try {
+                const { data: { user } } = await supabaseClient.auth.getUser();
+                if (!user) return;
+                const { data: remote, error } = await supabaseClient.from('piano_records').select('*').eq('user_id', user.id);
+                if (error) throw error;
+                const deletedIds = new Set(remote.filter(r => r.deleted_at).map(r => String(r.id)));
+                const local = getRecords().filter(r => !deletedIds.has(String(r.id)));
+                if (!remote.length && local.length) {
+                    const rows = local.map(r => ({ id: String(r.id), user_id: user.id, practice_date: r.date, practice_type: r.type, minutes: r.time, notes: r.notes || '', created_at: r.createdAt || new Date().toISOString() }));
+                    const { error: uploadError } = await supabaseClient.from('piano_records').upsert(rows);
+                    if (uploadError) throw uploadError;
+                } else {
+                    const remoteIds = new Set(remote.map(r => String(r.id)));
+                    const uploads = local.filter(r => !remoteIds.has(String(r.id))).map(r => ({ id: String(r.id), user_id: user.id, practice_date: r.date, practice_type: r.type, minutes: r.time, notes: r.notes || '', created_at: r.createdAt || new Date().toISOString() }));
+                    if (uploads.length) { const { error: uploadError } = await supabaseClient.from('piano_records').upsert(uploads); if (uploadError) throw uploadError; }
+                    const all = [...remote.filter(r => !r.deleted_at && !local.some(l => String(l.id) === String(r.id))).map(r => ({ id: r.id, date: r.practice_date, type: r.practice_type, time: r.minutes, notes: r.notes, createdAt: r.created_at })), ...local];
+                    localStorage.setItem('pianoRecords', JSON.stringify(all));
+                }
+                loadRecords(); updateStats();
+            } catch (error) { setSyncStatus('同步失败：' + error.message); }
+            finally { syncBusy = false; }
+        }
 
         // 设置今天的日期
         function setTodayDate() {
@@ -374,7 +468,7 @@
         }
 
         // 添加记录
-        function addRecord() {
+        async function addRecord() {
             const date = document.getElementById('practiceDate').value;
             const type = document.getElementById('practiceType').value;
             const time = document.getElementById('practiceTime').value;
@@ -396,6 +490,7 @@
             });
 
             saveRecords(records);
+            await pushRecord(records[records.length - 1]);
             clearForm();
             loadRecords();
             updateStats();
@@ -403,11 +498,12 @@
         }
 
         // 删除记录
-        function deleteRecord(id) {
+        async function deleteRecord(id) {
             if (confirm('确定要删除这条记录吗？')) {
                 let records = getRecords();
                 records = records.filter(r => r.id !== id);
                 saveRecords(records);
+                if (supabaseClient) { const { data: { user } } = await supabaseClient.auth.getUser(); if (user) await supabaseClient.from('piano_records').update({ deleted_at: new Date().toISOString() }).eq('id', String(id)).eq('user_id', user.id); }
                 loadRecords();
                 updateStats();
                 showNotification('已删除记录');
@@ -415,9 +511,10 @@
         }
 
         // 清空所有数据
-        function clearAllData() {
+        async function clearAllData() {
             if (confirm('确定要清空所有记录吗？此操作不可恢复！')) {
                 saveRecords([]);
+                if (supabaseClient) { const { data: { user } } = await supabaseClient.auth.getUser(); if (user) await supabaseClient.from('piano_records').update({ deleted_at: new Date().toISOString() }).eq('user_id', user.id).is('deleted_at', null); }
                 loadRecords();
                 updateStats();
                 showNotification('已清空所有数据');
@@ -561,6 +658,16 @@
             const data = localStorage.getItem('pianoRecords');
             return data ? JSON.parse(data) : [];
         }
+
+        async function pushRecord(record) {
+            if (!supabaseClient) return;
+            const { data: { user } } = await supabaseClient.auth.getUser();
+            if (!user) return;
+            const { error } = await supabaseClient.from('piano_records').upsert({ id: String(record.id), user_id: user.id, practice_date: record.date, practice_type: record.type, minutes: record.time, notes: record.notes || '', created_at: record.createdAt || new Date().toISOString() });
+            if (error) setSyncStatus('已保存在本机，云端同步失败：' + error.message);
+        }
+
+        setInterval(syncRecords, 15000);
 
         // 保存记录
         function saveRecords(records) {
